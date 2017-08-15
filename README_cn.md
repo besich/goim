@@ -1,6 +1,6 @@
-gopush-cluster
+goim
 ==============
-`Terry-Mao/goim` 是一个支持集群的im及实时推送服务（支持websocket，http和tcp协议）。
+`Terry-Mao/goim` 是一个支持集群的im及实时推送服务。
 
 ---------------------------------------
   * [特性](#特性)
@@ -8,6 +8,7 @@ gopush-cluster
   * [配置](#配置)
   * [例子](#例子)
   * [文档](#文档)
+  * [集群](#集群)
   * [更多](#更多)
 
 ---------------------------------------
@@ -16,11 +17,11 @@ gopush-cluster
  * 轻量级
  * 高性能
  * 纯Golang实现
- * 支持单个、多个以及广播消息推送
+ * 支持单个、多个、单房间以及广播消息推送
  * 支持单个Key多个订阅者（可限制订阅者最大人数）
- * 心跳支持（应用心跳和tcp、keepalive、http log pulling）
+ * 心跳支持（应用心跳和tcp、keepalive）
  * 支持安全验证（未授权用户不能订阅）
- * 多协议支持（websocket，tcp，http）
+ * 多协议支持（websocket，tcp）
  * 可拓扑的架构（job、logic模块可动态无限扩展）
  * 基于Kafka做异步消息推送
 
@@ -38,8 +39,8 @@ kafka在官网已经描述的非常详细，在这里就不过多说明，安装
 1.下载源码(根据自己的系统下载对应的[安装包](http://golang.org/dl/))
 ```sh
 $ cd /data/programfiles
-$ wget -c --no-check-certificate https://storage.googleapis.com/golang/go1.5.linux-amd64.tar.gz
-$ tar -xvf go1.5.linux-amd64.tar.gz -C /usr/local
+$ wget -c --no-check-certificate https://storage.googleapis.com/golang/go1.5.2.linux-amd64.tar.gz
+$ tar -xvf go1.5.2.linux-amd64.tar.gz -C /usr/local
 ```
 2.配置GO环境变量
 (这里我加在/etc/profile.d/golang.sh)
@@ -57,13 +58,14 @@ $ source /etc/profile
 ```sh
 $ yum install hg
 $ go get -u github.com/Terry-Mao/goim
-$ cd /data/apps/go/src/github.com/Terry-Mao/goim
+$ mv $GOPATH/src/github.com/Terry-Mao/goim $GOPATH/src/goim
+$ cd $GOPATH/src/goim
 $ go get ./...
 ```
 
 2.安装router、logic、comet、job模块(配置文件请依据实际机器环境配置)
 ```sh
-$ cd $GOPATH/src/github.com/Terry-Mao/goim/router
+$ cd $GOPATH/src/goim/router
 $ go install
 $ cp router-example.conf $GOPATH/bin/router.conf
 $ cp router-log.xml $GOPATH/bin/
@@ -104,8 +106,34 @@ TODO
 
 Websocket: [Websocket Client Demo](https://github.com/Terry-Mao/goim/tree/master/examples/javascript)
 
+Android: [Android](https://github.com/roamdy/goim-sdk)
+
+iOS: [iOS](https://github.com/roamdy/goim-oc-sdk)
+
 ## 文档
 [push http协议文档](https://github.com/Terry-Mao/goim/blob/master/doc/push.md)推送接口
+
+## 集群
+
+### comet
+
+comet 属于接入层，非常容易扩展，直接开启多个comet节点，修改配置文件中的base节点下的server.id修改成不同值（注意一定要保证不同的comet进程值唯一），前端接入可以使用LVS 或者 DNS来转发
+
+### logic
+
+logic 属于无状态的逻辑层，可以随意增加节点，使用nginx upstream来扩展http接口，内部rpc部分，可以使用LVS四层转发
+
+### kafka
+
+kafka 可以使用多broker，或者多partition来扩展队列
+
+### router
+
+router 属于有状态节点，logic可以使用一致性hash配置节点，增加多个router节点（目前还不支持动态扩容），提前预估好在线和压力情况
+
+### job
+
+job 根据kafka的partition来扩展多job工作方式，具体可以参考下kafka的partition负载
 
 ##更多
 TODO

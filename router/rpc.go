@@ -1,11 +1,12 @@
 package main
 
 import (
-	log "code.google.com/p/log4go"
-	inet "github.com/Terry-Mao/goim/libs/net"
-	proto "github.com/Terry-Mao/goim/proto/router"
-	rpc "github.com/Terry-Mao/protorpc"
+	inet "goim/libs/net"
+	"goim/libs/proto"
 	"net"
+	"net/rpc"
+
+	log "github.com/thinkboy/log4go"
 )
 
 func InitRPC(bs []*Bucket) (err error) {
@@ -49,16 +50,34 @@ type RouterRPC struct {
 
 func (r *RouterRPC) bucket(userId int64) *Bucket {
 	idx := int(userId % r.BucketIdx)
+	// fix panic
+	if idx < 0 {
+		idx = 0
+	}
 	return r.Buckets[idx]
 }
 
-func (r *RouterRPC) Connect(arg *proto.ConnArg, reply *proto.ConnReply) error {
+func (r *RouterRPC) Ping(arg *proto.NoArg, reply *proto.NoReply) error {
+	return nil
+}
+
+func (r *RouterRPC) Put(arg *proto.PutArg, reply *proto.PutReply) error {
 	reply.Seq = r.bucket(arg.UserId).Put(arg.UserId, arg.Server, arg.RoomId)
 	return nil
 }
 
-func (r *RouterRPC) Disconnect(arg *proto.DisconnArg, reply *proto.DisconnReply) error {
+func (r *RouterRPC) Del(arg *proto.DelArg, reply *proto.DelReply) error {
 	reply.Has = r.bucket(arg.UserId).Del(arg.UserId, arg.Seq, arg.RoomId)
+	return nil
+}
+
+func (r *RouterRPC) DelServer(arg *proto.DelServerArg, reply *proto.NoReply) error {
+	var (
+		bucket *Bucket
+	)
+	for _, bucket = range r.Buckets {
+		bucket.DelServer(arg.Server)
+	}
 	return nil
 }
 
@@ -134,6 +153,20 @@ func (r *RouterRPC) AllRoomCount(arg *proto.NoArg, reply *proto.AllRoomCountRepl
 	for _, bucket = range r.Buckets {
 		for roomId, count = range bucket.AllRoomCount() {
 			reply.Counter[roomId] += count
+		}
+	}
+	return nil
+}
+
+func (r *RouterRPC) AllServerCount(arg *proto.NoArg, reply *proto.AllServerCountReply) error {
+	var (
+		bucket        *Bucket
+		server, count int32
+	)
+	reply.Counter = make(map[int32]int32)
+	for _, bucket = range r.Buckets {
+		for server, count = range bucket.AllServerCount() {
+			reply.Counter[server] += count
 		}
 	}
 	return nil

@@ -1,14 +1,15 @@
 package main
 
 import (
-	log "code.google.com/p/log4go"
 	"encoding/json"
-	inet "github.com/Terry-Mao/goim/libs/net"
+	inet "goim/libs/net"
 	"io/ioutil"
 	"net"
 	"net/http"
 	"strconv"
 	"time"
+
+	log "github.com/thinkboy/log4go"
 )
 
 func InitHTTP() (err error) {
@@ -19,6 +20,8 @@ func InitHTTP() (err error) {
 		httpServeMux.HandleFunc("/1/push", Push)
 		httpServeMux.HandleFunc("/1/pushs", Pushs)
 		httpServeMux.HandleFunc("/1/push/all", PushAll)
+		httpServeMux.HandleFunc("/1/push/room", PushRoom)
+		httpServeMux.HandleFunc("/1/server/del", DelServer)
 		httpServeMux.HandleFunc("/1/count", Count)
 		log.Info("start http listen:\"%s\"", Conf.HTTPAddrs[i])
 		if network, addr, err = inet.ParseNetwork(Conf.HTTPAddrs[i]); err != nil {
@@ -79,7 +82,7 @@ func Push(w http.ResponseWriter, r *http.Request) {
 	}
 	var (
 		body      string
-		server    int32
+		serverId  int32
 		keys      []string
 		subKeys   map[int32][]string
 		bodyBytes []byte
@@ -101,8 +104,8 @@ func Push(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	subKeys = genSubKey(userId)
-	for server, keys = range subKeys {
-		if err = mpushKafka(server, keys, bodyBytes); err != nil {
+	for serverId, keys = range subKeys {
+		if err = mpushKafka(serverId, keys, bodyBytes); err != nil {
 			res["ret"] = InternalErr
 			return
 		}
@@ -135,7 +138,7 @@ func Pushs(w http.ResponseWriter, r *http.Request) {
 	var (
 		body      string
 		bodyBytes []byte
-		server    int32
+		serverId  int32
 		userIds   []int64
 		err       error
 		res       = map[string]interface{}{"ret": OK}
@@ -155,11 +158,48 @@ func Pushs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	subKeys = genSubKeys(userIds)
-	for server, keys = range subKeys {
-		if err = mpushKafka(server, keys, bodyBytes); err != nil {
+	for serverId, keys = range subKeys {
+		if err = mpushKafka(serverId, keys, bodyBytes); err != nil {
 			res["ret"] = InternalErr
 			return
 		}
+	}
+	res["ret"] = OK
+	return
+}
+
+func PushRoom(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method Not Allowed", 405)
+		return
+	}
+	var (
+		bodyBytes []byte
+		body      string
+		rid       int
+		err       error
+		param     = r.URL.Query()
+		res       = map[string]interface{}{"ret": OK}
+	)
+	defer retPWrite(w, r, res, &body, time.Now())
+	if bodyBytes, err = ioutil.ReadAll(r.Body); err != nil {
+		log.Error("ioutil.ReadAll() failed (%v)", err)
+		res["ret"] = InternalErr
+		return
+	}
+	body = string(bodyBytes)
+	ridStr := param.Get("rid")
+	enable, _ := strconv.ParseBool(param.Get("ensure"))
+	// push room
+	if rid, err = strconv.Atoi(ridStr); err != nil {
+		log.Error("strconv.Atoi(\"%s\") error(%v)", ridStr, err)
+		res["ret"] = InternalErr
+		return
+	}
+	if err = broadcastRoomKafka(int32(rid), bodyBytes, enable); err != nil {
+		log.Error("broadcastRoomKafka(\"%s\",\"%s\",\"%d\") error(%s)", rid, body, enable, err)
+		res["ret"] = InternalErr
+		return
 	}
 	res["ret"] = OK
 	return
@@ -174,7 +214,6 @@ func PushAll(w http.ResponseWriter, r *http.Request) {
 		bodyBytes []byte
 		body      string
 		err       error
-		ridStr    = r.URL.Query().Get("rid")
 		res       = map[string]interface{}{"ret": OK}
 	)
 	defer retPWrite(w, r, res, &body, time.Now())
@@ -184,28 +223,24 @@ func PushAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body = string(bodyBytes)
-	if len(ridStr) > 0 {
-		// push room
-		if _, err = strconv.Atoi(ridStr); err != nil {
-			log.Error("strconv.Atoi(\"%s\") error(%v)", ridStr, err)
-			res["ret"] = InternalErr
-			return
-		}
-		if err = broadcastRoomKafka(ridStr, bodyBytes); err != nil {
-			log.Error("broadcastKafka(\"%s\") error(%s)", body, err)
-			res["ret"] = InternalErr
-			return
-		}
-	} else {
-		// push all
-		if err := broadcastKafka(bodyBytes); err != nil {
-			log.Error("broadcastKafka(\"%s\") error(%s)", body, err)
-			res["ret"] = InternalErr
-			return
-		}
+	// push all
+	if err := broadcastKafka(bodyBytes); err != nil {
+		log.Error("broadcastKafka(\"%s\") error(%s)", body, err)
+		res["ret"] = InternalErr
+		return
 	}
 	res["ret"] = OK
 	return
+}
+
+type RoomCounter struct {
+	RoomId int32
+	Count  int32
+}
+
+type ServerCounter struct {
+	Server int32
+	Count  int32
 }
 
 func Count(w http.ResponseWriter, r *http.Request) {
@@ -219,7 +254,41 @@ func Count(w http.ResponseWriter, r *http.Request) {
 	)
 	defer retWrite(w, r, res, time.Now())
 	if typeStr == "room" {
-		// TODO
+		d := make([]*RoomCounter, 0, len(RoomCountMap))
+		for roomId, count := range RoomCountMap {
+			d = append(d, &RoomCounter{RoomId: roomId, Count: count})
+		}
+		res["data"] = d
+	} else if typeStr == "server" {
+		d := make([]*ServerCounter, 0, len(ServerCountMap))
+		for server, count := range ServerCountMap {
+			d = append(d, &ServerCounter{Server: server, Count: count})
+		}
+		res["data"] = d
 	}
-	res["ret"] = OK
+	return
+}
+
+func DelServer(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method Not Allowed", 405)
+		return
+	}
+	var (
+		err       error
+		serverStr = r.URL.Query().Get("server")
+		server    int64
+		res       = map[string]interface{}{"ret": OK}
+	)
+	if server, err = strconv.ParseInt(serverStr, 10, 32); err != nil {
+		log.Error("strconv.Atoi(\"%s\") error(%v)", serverStr, err)
+		res["ret"] = InternalErr
+		return
+	}
+	defer retWrite(w, r, res, time.Now())
+	if err = delServer(int32(server)); err != nil {
+		res["ret"] = InternalErr
+		return
+	}
+	return
 }

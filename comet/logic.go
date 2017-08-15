@@ -1,45 +1,55 @@
 package main
 
 import (
-	log "code.google.com/p/log4go"
-	inet "github.com/Terry-Mao/goim/libs/net"
-	proto "github.com/Terry-Mao/goim/proto/logic"
-	"github.com/Terry-Mao/protorpc"
+	inet "goim/libs/net"
+	"goim/libs/net/xrpc"
+	"goim/libs/proto"
 	"time"
+
+	log "github.com/thinkboy/log4go"
 )
 
 var (
-	logicRpcClient *protorpc.Client
+	logicRpcClient *xrpc.Clients
 	logicRpcQuit   = make(chan struct{}, 1)
 
 	logicService           = "RPC"
+	logicServicePing       = "RPC.Ping"
 	logicServiceConnect    = "RPC.Connect"
 	logicServiceDisconnect = "RPC.Disconnect"
 )
 
-func InitLogicRpc(addrs string) (err error) {
-	var network, addr string
-	if network, addr, err = inet.ParseNetwork(addrs); err != nil {
-		log.Error("inet.ParseNetwork() error(%v)", err)
-		return
+func InitLogicRpc(addrs []string) (err error) {
+	var (
+		bind          string
+		network, addr string
+		rpcOptions    []xrpc.ClientOptions
+	)
+	for _, bind = range addrs {
+		if network, addr, err = inet.ParseNetwork(bind); err != nil {
+			log.Error("inet.ParseNetwork() error(%v)", err)
+			return
+		}
+		options := xrpc.ClientOptions{
+			Proto: network,
+			Addr:  addr,
+		}
+		rpcOptions = append(rpcOptions, options)
 	}
-	logicRpcClient, err = protorpc.Dial(network, addr)
-	if err != nil {
-		log.Error("rpc.Dial(\"%s\", \"%s\") error(%s)", network, addr, err)
-	}
-	go protorpc.Reconnect(&logicRpcClient, logicRpcQuit, network, addr)
-	log.Debug("logic rpc addr %s:%s connected", network, addr)
+	// rpc clients
+	logicRpcClient = xrpc.Dials(rpcOptions)
+	// ping & reconnect
+	logicRpcClient.Ping(logicServicePing)
+	log.Info("init logic rpc: %v", rpcOptions)
 	return
 }
 
-func connect(p *Proto) (key string, rid int32, heartbeat time.Duration, err error) {
-	if logicRpcClient == nil {
-		err = ErrLogic
-		return
-	}
-	arg := &proto.ConnArg{Token: string(p.Body), Server: Conf.ServerId}
-	reply := &proto.ConnReply{}
-	if err = logicRpcClient.Call(logicServiceConnect, arg, reply); err != nil {
+func connect(p *proto.Proto) (key string, rid int32, heartbeat time.Duration, err error) {
+	var (
+		arg   = proto.ConnArg{Token: string(p.Body), Server: Conf.ServerId}
+		reply = proto.ConnReply{}
+	)
+	if err = logicRpcClient.Call(logicServiceConnect, &arg, &reply); err != nil {
 		log.Error("c.Call(\"%s\", \"%v\", &ret) error(%v)", logicServiceConnect, arg, err)
 		return
 	}
@@ -50,13 +60,11 @@ func connect(p *Proto) (key string, rid int32, heartbeat time.Duration, err erro
 }
 
 func disconnect(key string, roomId int32) (has bool, err error) {
-	if logicRpcClient == nil {
-		err = ErrLogic
-		return
-	}
-	arg := &proto.DisconnArg{Key: key, RoomId: roomId}
-	reply := &proto.DisconnReply{}
-	if err = logicRpcClient.Call(logicServiceDisconnect, arg, reply); err != nil {
+	var (
+		arg   = proto.DisconnArg{Key: key, RoomId: roomId}
+		reply = proto.DisconnReply{}
+	)
+	if err = logicRpcClient.Call(logicServiceDisconnect, &arg, &reply); err != nil {
 		log.Error("c.Call(\"%s\", \"%v\", &ret) error(%v)", logicServiceConnect, arg, err)
 		return
 	}

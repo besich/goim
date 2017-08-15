@@ -2,10 +2,10 @@ package main
 
 import (
 	"flag"
+	"goim/libs/perf"
 	"runtime"
 
-	log "code.google.com/p/log4go"
-	"github.com/Terry-Mao/goim/libs/perf"
+	log "github.com/thinkboy/log4go"
 )
 
 func main() {
@@ -19,19 +19,23 @@ func main() {
 	log.Info("logic[%s] start", Ver)
 	perf.Init(Conf.PprofAddrs)
 	// router rpc
-	if err := InitRouter(); err != nil {
+	if err := InitRouter(Conf.RouterRPCAddrs); err != nil {
 		log.Warn("router rpc current can't connect, retry")
 	}
-	MergeRoomCount()
-	go SyncRoomCount()
+	// start monitor
+	if Conf.MonitorOpen {
+		InitMonitor(Conf.MonitorAddrs)
+	}
+	MergeCount()
+	go SyncCount()
 	// logic rpc
 	if err := InitRPC(NewDefaultAuther()); err != nil {
 		panic(err)
 	}
-	if err := InitKafka(Conf.KafkaAddrs); err != nil {
+	if err := InitHTTP(); err != nil {
 		panic(err)
 	}
-	if err := InitHTTP(); err != nil {
+	if err := InitKafka(Conf.KafkaAddrs); err != nil {
 		panic(err)
 	}
 	// block until a signal is received.

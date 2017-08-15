@@ -1,74 +1,79 @@
 package main
 
 import (
-	log "code.google.com/p/log4go"
+	"goim/libs/proto"
+
+	log "github.com/thinkboy/log4go"
 )
 
 type Ring struct {
 	// read
-	rn int
-	rp int
+	rp   uint64
+	num  uint64
+	mask uint64
+	// TODO split cacheline, many cpu cache line size is 64
+	// pad [40]byte
 	// write
-	wn int
-	wp int
-	// info
-	num  int
-	data []Proto
+	wp   uint64
+	data []proto.Proto
 }
 
 func NewRing(num int) *Ring {
 	r := new(Ring)
-	r.data = make([]Proto, num)
-	r.num = num
+	r.init(uint64(num))
 	return r
 }
 
-func InitRing(r *Ring, num int) {
-	if num > 0 {
-		r.data = make([]Proto, num)
-		r.num = num
-	}
+func (r *Ring) Init(num int) {
+	r.init(uint64(num))
 }
 
-func (r *Ring) Get() (proto *Proto, err error) {
-	if r.wn == r.rn {
+func (r *Ring) init(num uint64) {
+	// 2^N
+	if num&(num-1) != 0 {
+		for num&(num-1) != 0 {
+			num &= (num - 1)
+		}
+		num = num << 1
+	}
+	r.data = make([]proto.Proto, num)
+	r.num = num
+	r.mask = r.num - 1
+}
+
+func (r *Ring) Get() (proto *proto.Proto, err error) {
+	if r.rp == r.wp {
 		return nil, ErrRingEmpty
 	}
-	proto = &r.data[r.rp]
+	proto = &r.data[r.rp&r.mask]
 	return
 }
 
 func (r *Ring) GetAdv() {
-	if r.rp++; r.rp >= r.num {
-		r.rp = 0
-	}
-	r.rn++
-	if Conf.Debug {
-		log.Debug("ring rn: %d, rp: %d", r.rn, r.rp)
+	r.rp++
+	if Debug {
+		log.Debug("ring rp: %d, idx: %d", r.rp, r.rp&r.mask)
 	}
 }
 
-func (r *Ring) Set() (proto *Proto, err error) {
-	if r.wn-r.rn >= r.num {
+func (r *Ring) Set() (proto *proto.Proto, err error) {
+	if r.wp-r.rp >= r.num {
 		return nil, ErrRingFull
 	}
-	proto = &r.data[r.wp]
+	proto = &r.data[r.wp&r.mask]
 	return
 }
 
 func (r *Ring) SetAdv() {
-	if r.wp++; r.wp >= r.num {
-		r.wp = 0
-	}
-	r.wn++
-	if Conf.Debug {
-		log.Debug("ring wn: %d, wp: %d", r.wn, r.wp)
+	r.wp++
+	if Debug {
+		log.Debug("ring wp: %d, idx: %d", r.wp, r.wp&r.mask)
 	}
 }
 
 func (r *Ring) Reset() {
-	r.rn = 0
 	r.rp = 0
-	r.wn = 0
 	r.wp = 0
+	// prevent pad compiler optimization
+	// r.pad = [40]byte{}
 }

@@ -1,10 +1,11 @@
 package main
 
 import (
-	log "code.google.com/p/log4go"
 	"flag"
-	"github.com/Terry-Mao/goim/libs/perf"
+	"goim/libs/perf"
 	"runtime"
+
+	log "github.com/thinkboy/log4go"
 )
 
 const (
@@ -22,6 +23,10 @@ func main() {
 	log.Info("router[%s] start", VERSION)
 	// start prof
 	perf.Init(Conf.PprofAddrs)
+	// start monitor
+	if Conf.MonitorOpen {
+		InitMonitor(Conf.MonitorAddrs)
+	}
 	// start rpc
 	buckets := make([]*Bucket, Conf.Bucket)
 	for i := 0; i < Conf.Bucket; i++ {

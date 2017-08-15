@@ -1,52 +1,66 @@
 package main
 
 import (
-	log "code.google.com/p/log4go"
-	"sync"
+	"goim/libs/bytes"
+	"goim/libs/time"
 )
 
+type RoundOptions struct {
+	Timer        int
+	TimerSize    int
+	Reader       int
+	ReadBuf      int
+	ReadBufSize  int
+	Writer       int
+	WriteBuf     int
+	WriteBufSize int
+}
+
+// Ronnd userd for connection round-robin get a reader/writer/timer for split big lock.
 type Round struct {
-	readers   []*sync.Pool
-	writers   []*sync.Pool
-	timers    []*Timer
+	readers   []bytes.Pool
+	writers   []bytes.Pool
+	timers    []time.Timer
+	options   RoundOptions
 	readerIdx int
 	writerIdx int
 	timerIdx  int
 }
 
-func NewRound(readBuf, writeBuf, timer, timerSize int) *Round {
-	r := new(Round)
-	log.Debug("create %d reader buffer pool", readBuf)
-	r.readerIdx = readBuf
-	r.readers = make([]*sync.Pool, readBuf)
-	for i := 0; i < readBuf; i++ {
-		r.readers[i] = new(sync.Pool)
+// NewRound new a round struct.
+func NewRound(options RoundOptions) (r *Round) {
+	var i int
+	r = new(Round)
+	r.options = options
+	// reader
+	r.readers = make([]bytes.Pool, options.Reader)
+	for i = 0; i < options.Reader; i++ {
+		r.readers[i].Init(options.ReadBuf, options.ReadBufSize)
 	}
-	log.Debug("create %d writer buffer pool", writeBuf)
-	r.writerIdx = writeBuf
-	r.writers = make([]*sync.Pool, writeBuf)
-	for i := 0; i < writeBuf; i++ {
-		r.writers[i] = new(sync.Pool)
+	// writer
+	r.writers = make([]bytes.Pool, options.Writer)
+	for i = 0; i < options.Writer; i++ {
+		r.writers[i].Init(options.WriteBuf, options.WriteBufSize)
 	}
-	log.Debug("create %d timer", timer)
-	r.timerIdx = timer
-	r.timers = make([]*Timer, timer)
-	for i := 0; i < timer; i++ {
-		r.timers[i] = NewTimer(timerSize)
+	// timer
+	r.timers = make([]time.Timer, options.Timer)
+	for i = 0; i < options.Timer; i++ {
+		r.timers[i].Init(options.TimerSize)
 	}
-	// start timer process
-	go TimerProcess(r.timers)
-	return r
+	return
 }
 
-func (r *Round) Timer(rn int) *Timer {
-	return r.timers[rn%r.timerIdx]
+// Timer get a timer.
+func (r *Round) Timer(rn int) *time.Timer {
+	return &(r.timers[rn%r.options.Timer])
 }
 
-func (r *Round) Reader(rn int) *sync.Pool {
-	return r.readers[rn%r.readerIdx]
+// Reader get a reader memory buffer.
+func (r *Round) Reader(rn int) *bytes.Pool {
+	return &(r.readers[rn%r.options.Reader])
 }
 
-func (r *Round) Writer(rn int) *sync.Pool {
-	return r.writers[rn%r.writerIdx]
+// Writer get a writer memory buffer pool.
+func (r *Round) Writer(rn int) *bytes.Pool {
+	return &(r.writers[rn%r.options.Writer])
 }

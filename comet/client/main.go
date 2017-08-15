@@ -1,11 +1,10 @@
 package main
 
 import (
-	log "code.google.com/p/log4go"
 	"flag"
-	"github.com/Terry-Mao/goim/libs/perf"
 	"runtime"
-	"time"
+
+	log "github.com/thinkboy/log4go"
 )
 
 func main() {
@@ -16,7 +15,6 @@ func main() {
 	runtime.GOMAXPROCS(Conf.MaxProc)
 	log.LoadConfiguration(Conf.Log)
 	defer log.Close()
-	perf.Init(Conf.PprofBind)
 	if Conf.Type == ProtoTCP {
 		initTCP()
 	} else if Conf.Type == ProtoWebsocket {
@@ -24,5 +22,4 @@ func main() {
 	} else if Conf.Type == ProtoWebsocketTLS {
 		initWebsocketTLS()
 	}
-	time.Sleep(10 * time.Second)
 }

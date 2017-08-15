@@ -7,17 +7,18 @@ package main
 
 import (
 	"bufio"
-	log "code.google.com/p/log4go"
 	"encoding/binary"
 	"flag"
 	"fmt"
-	mrand "math/rand"
+	//mrand "math/rand"
 	"net"
 	"os"
 	"runtime"
 	"strconv"
 	"sync/atomic"
 	"time"
+
+	log "github.com/thinkboy/log4go"
 )
 
 const (
@@ -67,12 +68,10 @@ func main() {
 		panic(err)
 	}
 
-	//time.AfterFunc(time.Duration(t)*time.Second, stop)
 	go result()
 
 	for i := begin; i < begin+num; i++ {
-		key := fmt.Sprintf("%d", i)
-		go startClient(key)
+		go client(fmt.Sprintf("%d", i))
 	}
 
 	var exit chan bool
@@ -80,20 +79,37 @@ func main() {
 }
 
 func result() {
-	var lastTimes int64
+	var (
+		lastTimes int64
+		diff      int64
+		nowCount  int64
+		timer     = int64(30)
+	)
+
 	for {
-		lastTimes = countDown
-		time.Sleep(time.Second)
-		fmt.Println(fmt.Sprintf("down:%d down/s:%d", countDown, countDown-lastTimes))
+		nowCount = atomic.LoadInt64(&countDown)
+		diff = nowCount - lastTimes
+		lastTimes = nowCount
+		fmt.Println(fmt.Sprintf("%s down:%d down/s:%d", time.Now().Format("2006-01-02 15:04:05"), nowCount, diff/timer))
+		time.Sleep(time.Duration(timer) * time.Second)
+	}
+}
+
+func client(key string) {
+	for {
+		startClient(key)
+		time.Sleep(3 * time.Second)
 	}
 }
 
 func startClient(key string) {
-	time.Sleep(time.Duration(mrand.Intn(30)) * time.Second)
+	//time.Sleep(time.Duration(mrand.Intn(30)) * time.Second)
+	quit := make(chan bool, 1)
+	defer close(quit)
 
 	conn, err := net.Dial("tcp", os.Args[3])
 	if err != nil {
-		log.Error("net.Dial(\"%s\") error(%v)", os.Args[2], err)
+		log.Error("net.Dial(\"%s\") error(%v)", os.Args[3], err)
 		return
 	}
 	seqId := int32(0)
@@ -115,7 +131,7 @@ func startClient(key string) {
 		log.Error("tcpReadProto() error(%v)", err)
 		return
 	}
-	log.Debug("auth ok, proto: %v", proto)
+	log.Debug("key:%s auth ok, proto: %v", key, proto)
 	seqId++
 	// writer
 	go func() {
@@ -126,39 +142,38 @@ func startClient(key string) {
 			proto1.SeqId = seqId
 			proto1.Body = nil
 			if err = tcpWriteProto(wr, proto1); err != nil {
-				log.Error("tcpWriteProto() error(%v)", err)
+				log.Error("key:%s tcpWriteProto() error(%v)", key, err)
 				return
 			}
+			log.Debug("key:%s Write heartbeat", key)
 			// test heartbeat
 			time.Sleep(heart)
 			seqId++
-			// op_test
-			/*proto1.Operation = OP_TEST
-			proto1.SeqId = seqId
-			if err = tcpWriteProto(wr, proto1); err != nil {
-				log.Error("tcpWriteProto() error(%v)", err)
+			select {
+			case <-quit:
 				return
+			default:
 			}
-			seqId++
-			time.Sleep(10000 * time.Millisecond)*/
 		}
 	}()
 	// reader
 	for {
 		if err = tcpReadProto(rd, proto); err != nil {
-			log.Error("tcpReadProto() error(%v)", err)
+			log.Error("key:%s tcpReadProto() error(%v)", key, err)
+			quit <- true
 			return
 		}
 		if proto.Operation == OP_HEARTBEAT_REPLY {
-			log.Debug("receive heartbeat")
-			if err = conn.SetReadDeadline(time.Now().Add(heart + 60)); err != nil {
+			log.Debug("key:%s receive heartbeat", key)
+			if err = conn.SetReadDeadline(time.Now().Add(heart + 60*time.Second)); err != nil {
 				log.Error("conn.SetReadDeadline() error(%v)", err)
+				quit <- true
 				return
 			}
 		} else if proto.Operation == OP_TEST_REPLY {
 			log.Debug("body: %s", string(proto.Body))
 		} else if proto.Operation == OP_SEND_SMS_REPLY {
-			log.Info("msg: %s", string(proto.Body))
+			log.Info("key:%s msg: %s", key, string(proto.Body))
 			atomic.AddInt64(&countDown, 1)
 		}
 	}
@@ -182,7 +197,7 @@ func tcpWriteProto(wr *bufio.Writer, proto *Proto) (err error) {
 		return
 	}
 	if proto.Body != nil {
-		log.Debug("cipher body: %v", proto.Body)
+		//log.Debug("cipher body: %v", proto.Body)
 		if err = binary.Write(wr, binary.BigEndian, proto.Body); err != nil {
 			return
 		}
@@ -200,29 +215,29 @@ func tcpReadProto(rd *bufio.Reader, proto *Proto) (err error) {
 	if err = binary.Read(rd, binary.BigEndian, &packLen); err != nil {
 		return
 	}
-	log.Debug("packLen: %d", packLen)
+	//log.Debug("packLen: %d", packLen)
 	if err = binary.Read(rd, binary.BigEndian, &headerLen); err != nil {
 		return
 	}
-	log.Debug("headerLen: %d", headerLen)
+	//log.Debug("headerLen: %d", headerLen)
 	if err = binary.Read(rd, binary.BigEndian, &proto.Ver); err != nil {
 		return
 	}
-	log.Debug("ver: %d", proto.Ver)
+	//log.Debug("ver: %d", proto.Ver)
 	if err = binary.Read(rd, binary.BigEndian, &proto.Operation); err != nil {
 		return
 	}
-	log.Debug("operation: %d", proto.Operation)
+	//log.Debug("operation: %d", proto.Operation)
 	if err = binary.Read(rd, binary.BigEndian, &proto.SeqId); err != nil {
 		return
 	}
-	log.Debug("seqId: %d", proto.SeqId)
+	//log.Debug("seqId: %d", proto.SeqId)
 	var (
 		n       = int(0)
 		t       = int(0)
 		bodyLen = int(packLen - int32(headerLen))
 	)
-	log.Debug("read body len: %d", bodyLen)
+	//log.Debug("read body len: %d", bodyLen)
 	if bodyLen > 0 {
 		proto.Body = make([]byte, bodyLen)
 		for {

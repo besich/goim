@@ -1,24 +1,38 @@
 package main
 
 import (
-	log "code.google.com/p/log4go"
 	"crypto/tls"
-	"github.com/Terry-Mao/goim/define"
-	"golang.org/x/net/websocket"
+	"goim/libs/define"
+	"goim/libs/proto"
+	itime "goim/libs/time"
 	"math/rand"
 	"net"
 	"net/http"
 	"time"
+
+	"github.com/gorilla/websocket"
+	log "github.com/thinkboy/log4go"
 )
 
-func InitWebsocket() (err error) {
+var upgrader = websocket.Upgrader{
+	ReadBufferSize:  4096,
+	WriteBufferSize: 4096,
+	CheckOrigin: func(r *http.Request) bool {
+		return true
+	},
+}
+
+func InitWebsocket(addrs []string) (err error) {
 	var (
+		bind         string
 		listener     *net.TCPListener
 		addr         *net.TCPAddr
 		httpServeMux = http.NewServeMux()
+		server       *http.Server
 	)
-	httpServeMux.Handle("/sub", websocket.Handler(serveWebsocket))
-	for _, bind := range Conf.WebsocketBind {
+	httpServeMux.HandleFunc("/sub", ServeWebSocket)
+
+	for _, bind = range addrs {
 		if addr, err = net.ResolveTCPAddr("tcp4", bind); err != nil {
 			log.Error("net.ResolveTCPAddr(\"tcp4\", \"%s\") error(%v)", bind, err)
 			return
@@ -27,246 +41,209 @@ func InitWebsocket() (err error) {
 			log.Error("net.ListenTCP(\"tcp4\", \"%s\") error(%v)", bind, err)
 			return
 		}
-		server := &http.Server{Handler: httpServeMux}
-		log.Debug("start websocket listen: \"%s\"", bind)
-		go func() {
+		server = &http.Server{Handler: httpServeMux}
+		if Debug {
+			log.Debug("start websocket listen: \"%s\"", bind)
+		}
+		go func(host string) {
 			if err = server.Serve(listener); err != nil {
-				log.Error("server.Serve(\"%s\") error(%v)", bind, err)
+				log.Error("server.Serve(\"%s\") error(%v)", host, err)
 				panic(err)
 			}
-		}()
+		}(bind)
 	}
 	return
 }
 
-func InitWebsocketWithTLS() (err error) {
+func InitWebsocketWithTLS(addrs []string, cert, priv string) (err error) {
 	var (
 		httpServeMux = http.NewServeMux()
 	)
-	httpServeMux.Handle("/sub", websocket.Handler(serveWebsocket))
+	httpServeMux.HandleFunc("/sub", ServeWebSocket)
 	config := &tls.Config{}
 	config.Certificates = make([]tls.Certificate, 1)
-	config.Certificates[0], err = tls.LoadX509KeyPair(Conf.CertFile, Conf.PrivateFile)
-	if err != nil {
+	if config.Certificates[0], err = tls.LoadX509KeyPair(cert, priv); err != nil {
 		return
 	}
-	for _, bind := range Conf.WebsocketTLSBind {
+	for _, bind := range addrs {
 		server := &http.Server{Addr: bind, Handler: httpServeMux}
 		server.SetKeepAlivesEnabled(true)
-		log.Debug("start websocket wss listen: \"%s\"", bind)
-		go func() {
-			ln, err := net.Listen("tcp", bind)
+		if Debug {
+			log.Debug("start websocket wss listen: \"%s\"", bind)
+		}
+		go func(host string) {
+			ln, err := net.Listen("tcp", host)
 			if err != nil {
 				return
 			}
 
 			tlsListener := tls.NewListener(ln, config)
 			if err = server.Serve(tlsListener); err != nil {
-				log.Error("server.Serve(\"%s\") error(%v)", bind, err)
+				log.Error("server.Serve(\"%s\") error(%v)", host, err)
 				return
 			}
-		}()
+		}(bind)
 	}
 	return
 }
 
-func serveWebsocket(conn *websocket.Conn) {
-	var (
-		// ip addr
-		lAddr = conn.LocalAddr()
-		rAddr = conn.RemoteAddr()
-		// timer
-		tr = DefaultServer.round.Timer(rand.Int())
-	)
-	log.Debug("start websocket serve \"%s\" with \"%s\"", lAddr, rAddr)
-	DefaultServer.serveWebsocket(conn, tr)
-}
-
-func (server *Server) serveWebsocket(conn *websocket.Conn, tr *Timer) {
-	var (
-		p   *Proto
-		b   *Bucket
-		hb  time.Duration // heartbeat
-		key string
-		err error
-		trd *TimerData
-		ch  = NewChannel(Conf.CliProto, Conf.SvrProto, define.NoRoom)
-	)
-	// auth
-	if trd, err = tr.Add(Conf.HandshakeTimeout, conn); err != nil {
-		log.Error("handshake: timer.Add() error(%v)", err)
-	} else {
-		if key, hb, err = server.authWebsocket(conn, ch); err != nil {
-			log.Error("handshake: server.auth error(%v)", err)
-		}
-		//deltimer
-		tr.Del(trd)
-	}
-	// failed
-	if err != nil {
-		if err = conn.Close(); err != nil {
-			log.Error("handshake: conn.Close() error(%v)", err)
-		}
+func ServeWebSocket(w http.ResponseWriter, req *http.Request) {
+	if req.Method != "GET" {
+		http.Error(w, "Method Not Allowed", 405)
 		return
 	}
-	// register key->channel
-	b = server.Bucket(key)
-	b.Put(key, ch)
+	ws, err := upgrader.Upgrade(w, req, nil)
+	if err != nil {
+		log.Error("Websocket Upgrade error(%v), userAgent(%s)", err, req.UserAgent())
+		return
+	}
+	defer ws.Close()
+	var (
+		lAddr = ws.LocalAddr()
+		rAddr = ws.RemoteAddr()
+		tr    = DefaultServer.round.Timer(rand.Int())
+	)
+	log.Debug("start websocket serve \"%s\" with \"%s\"", lAddr, rAddr)
+	DefaultServer.serveWebsocket(ws, tr)
+}
+
+func (server *Server) serveWebsocket(conn *websocket.Conn, tr *itime.Timer) {
+	var (
+		err error
+		key string
+		hb  time.Duration // heartbeat
+		p   *proto.Proto
+		b   *Bucket
+		trd *itime.TimerData
+		ch  = NewChannel(server.Options.CliProto, server.Options.SvrProto, define.NoRoom)
+	)
+	// handshake
+	trd = tr.Add(server.Options.HandshakeTimeout, func() {
+		conn.Close()
+	})
+	// must not setadv, only used in auth
+	if p, err = ch.CliProto.Set(); err == nil {
+		if key, ch.RoomId, hb, err = server.authWebsocket(conn, p); err == nil {
+			b = server.Bucket(key)
+			err = b.Put(key, ch)
+		}
+	}
+	if err != nil {
+		conn.Close()
+		tr.Del(trd)
+		log.Error("handshake failed error(%v)", err)
+		return
+	}
+	trd.Key = key
+	tr.Set(trd, hb)
 	// hanshake ok start dispatch goroutine
-	go server.dispatchWebsocket(conn, ch, hb, tr)
+	go server.dispatchWebsocket(key, conn, ch)
 	for {
-		// fetch a proto from channel free list
 		if p, err = ch.CliProto.Set(); err != nil {
-			log.Error("%s fetch client proto error(%v)", key, err)
 			break
 		}
-		// parse request protocol
-		if err = server.readWebsocketRequest(conn, p); err != nil {
-			log.Error("%s read client request error(%v)", key, err)
+		if err = p.ReadWebsocket(conn); err != nil {
 			break
 		}
-		// send to writer
+		//p.Time = *globalNowTime
+		if p.Operation == define.OP_HEARTBEAT {
+			// heartbeat
+			tr.Set(trd, hb)
+			p.Body = nil
+			p.Operation = define.OP_HEARTBEAT_REPLY
+		} else {
+			// process message
+			if err = server.operator.Operate(p); err != nil {
+				break
+			}
+		}
 		ch.CliProto.SetAdv()
 		ch.Signal()
 	}
-	// dialog finish
-	// revoke the subkey
-	// revoke the remote subkey
-	// close the net.Conn
-	// read & write goroutine
-	// return channel to bucket's free list
-	// may call twice
-	if err = conn.Close(); err != nil {
-		log.Error("reader: conn.Close() error(%v)", err)
-	}
-	ch.Finish()
+	log.Error("key: %s server websocket failed error(%v)", key, err)
+	tr.Del(trd)
+	conn.Close()
+	ch.Close()
 	b.Del(key)
 	if err = server.operator.Disconnect(key, ch.RoomId); err != nil {
-		log.Error("%s operator do disconnect error(%v)", key, err)
+		log.Error("key: %s operator do disconnect error(%v)", key, err)
 	}
-	log.Debug("%s serverconn goroutine exit", key)
+	if Debug {
+		log.Debug("key: %s server websocket goroutine exit", key)
+	}
 	return
 }
 
 // dispatch accepts connections on the listener and serves requests
 // for each incoming connection.  dispatch blocks; the caller typically
 // invokes it in a go statement.
-func (server *Server) dispatchWebsocket(conn *websocket.Conn, ch *Channel, hb time.Duration, tr *Timer) {
+func (server *Server) dispatchWebsocket(key string, conn *websocket.Conn, ch *Channel) {
 	var (
-		p   *Proto
+		p   *proto.Proto
 		err error
-		trd *TimerData
 	)
-	log.Debug("start dispatch goroutine")
-	if trd, err = tr.Add(hb, conn); err != nil {
-		log.Error("dispatch: timer.Add() error(%v)", err)
-		goto failed
+	if Debug {
+		log.Debug("key: %s start dispatch websocket goroutine", key)
 	}
 	for {
-		if !ch.Ready() {
-			goto failed
-		}
-		// fetch message from clibox(client send)
-		for {
-			if p, err = ch.CliProto.Get(); err != nil {
-				break
+		p = ch.Ready()
+		switch p {
+		case proto.ProtoFinish:
+			if Debug {
+				log.Debug("key: %s wakeup exit dispatch goroutine", key)
 			}
-			if p.Operation == define.OP_HEARTBEAT {
-				// Use a previous timer value if difference between it and a new
-				// value is less than TIMER_LAZY_DELAY milliseconds: this allows
-				// to minimize the minheap operations for fast connections.
-				if !trd.Lazy(hb) {
-					tr.Del(trd)
-					if trd, err = tr.Add(hb, conn); err != nil {
-						log.Error("dispatch: timer.Add() error(%v)", err)
-						goto failed
-					}
+			goto failed
+		case proto.ProtoReady:
+			for {
+				if p, err = ch.CliProto.Get(); err != nil {
+					err = nil // must be empty error
+					break
 				}
-				// heartbeat
-				p.Body = nil
-				p.Operation = define.OP_HEARTBEAT_REPLY
-			} else {
-				// process message
-				if err = server.operator.Operate(p); err != nil {
-					log.Error("operator.Operate() error(%v)", err)
+				if err = p.WriteWebsocket(conn); err != nil {
 					goto failed
 				}
+				p.Body = nil // avoid memory leak
+				ch.CliProto.GetAdv()
 			}
-			if err = server.writeWebsocketResponse(conn, p); err != nil {
-				log.Error("server.sendTCPResponse() error(%v)", err)
-				goto failed
-			}
-			ch.CliProto.GetAdv()
-		}
-		// fetch message from svrbox(server send)
-		for {
-			if p, err = ch.SvrProto.Get(); err != nil {
-				log.Warn("ch.SvrProto.Get() error(%v)", err)
-				break
-			}
+		default:
+			// TODO room-push support
 			// just forward the message
-			if err = server.writeWebsocketResponse(conn, p); err != nil {
-				log.Error("server.sendTCPResponse() error(%v)", err)
+			if err = p.WriteWebsocket(conn); err != nil {
 				goto failed
 			}
-			ch.SvrProto.GetAdv()
 		}
 	}
 failed:
-	// wake reader up
-	if err = conn.Close(); err != nil {
-		log.Warn("conn.Close() error(%v)", err)
+	if err != nil {
+		log.Error("key: %s dispatch websocket error(%v)", key, err)
 	}
-	// deltimer
-	tr.Del(trd)
-	log.Debug("dispatch goroutine exit")
+	conn.Close()
+	// must ensure all channel message discard, for reader won't blocking Signal
+	for {
+		if p == proto.ProtoFinish {
+			break
+		}
+		p = ch.Ready()
+	}
+	if Debug {
+		log.Debug("key: %s dispatch goroutine exit", key)
+	}
 	return
 }
 
-// auth for goim handshake with client, use rsa & aes.
-func (server *Server) authWebsocket(conn *websocket.Conn, ch *Channel) (subKey string, heartbeat time.Duration, err error) {
-	var p *Proto
-	// WARN
-	// don't adv the cli proto, after auth simply discard it.
-	if p, err = ch.CliProto.Set(); err != nil {
-		return
-	}
-	if err = server.readWebsocketRequest(conn, p); err != nil {
+func (server *Server) authWebsocket(conn *websocket.Conn, p *proto.Proto) (key string, rid int32, heartbeat time.Duration, err error) {
+	if err = p.ReadWebsocket(conn); err != nil {
 		return
 	}
 	if p.Operation != define.OP_AUTH {
-		log.Warn("auth operation not valid: %d", p.Operation)
 		err = ErrOperation
 		return
 	}
-	if subKey, ch.RoomId, heartbeat, err = server.operator.Connect(p); err != nil {
-		log.Error("operator.Connect error(%v)", err)
+	if key, rid, heartbeat, err = server.operator.Connect(p); err != nil {
 		return
 	}
-	p.Body = nil
+	p.Body = emptyJSONBody
 	p.Operation = define.OP_AUTH_REPLY
-	if err = server.writeWebsocketResponse(conn, p); err != nil {
-		log.Error("[%s] server.sendTCPResponse() error(%v)", subKey, err)
-	}
-	return
-}
-
-// readRequest
-func (server *Server) readWebsocketRequest(conn *websocket.Conn, proto *Proto) (err error) {
-	if err = websocket.JSON.Receive(conn, proto); err != nil {
-		log.Error("websocket.JSON.Receive() error(%v)", err)
-	}
-	return
-}
-
-// sendResponse send resp to client, sendResponse must be goroutine safe.
-func (server *Server) writeWebsocketResponse(conn *websocket.Conn, proto *Proto) (err error) {
-	if proto.Body == nil {
-		proto.Body = emptyJSONBody
-	}
-	if err = websocket.JSON.Send(conn, proto); err != nil {
-		log.Error("websocket.JSON.Send() error(%v)", err)
-	}
-	proto.Reset()
+	err = p.WriteWebsocket(conn)
 	return
 }

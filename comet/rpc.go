@@ -1,22 +1,23 @@
 package main
 
 import (
-	log "code.google.com/p/log4go"
-	inet "github.com/Terry-Mao/goim/libs/net"
-	proto "github.com/Terry-Mao/goim/proto/comet"
-	rpc "github.com/Terry-Mao/protorpc"
+	inet "goim/libs/net"
+	"goim/libs/proto"
 	"net"
+	"net/rpc"
+
+	log "github.com/thinkboy/log4go"
 )
 
-func InitRPCPush() (err error) {
+func InitRPCPush(addrs []string) (err error) {
 	var (
+		bind          string
 		network, addr string
 		c             = &PushRPC{}
 	)
 	rpc.Register(c)
-	for i := 0; i < len(Conf.RPCPushAddrs); i++ {
-		log.Info("start listen rpc addr: \"%s\"", Conf.RPCPushAddrs[i])
-		if network, addr, err = inet.ParseNetwork(Conf.RPCPushAddrs[i]); err != nil {
+	for _, bind = range addrs {
+		if network, addr, err = inet.ParseNetwork(bind); err != nil {
 			log.Error("inet.ParseNetwork() error(%v)", err)
 			return
 		}
@@ -45,6 +46,10 @@ func rpcListen(network, addr string) {
 type PushRPC struct {
 }
 
+func (this *PushRPC) Ping(arg *proto.NoArg, reply *proto.NoReply) error {
+	return nil
+}
+
 // Push push a message to a specified sub key
 func (this *PushRPC) PushMsg(arg *proto.PushMsgArg, reply *proto.NoReply) (err error) {
 	var (
@@ -56,31 +61,13 @@ func (this *PushRPC) PushMsg(arg *proto.PushMsgArg, reply *proto.NoReply) (err e
 		return
 	}
 	bucket = DefaultServer.Bucket(arg.Key)
-	if channel = bucket.Get(arg.Key); channel != nil {
-		err = channel.PushMsg(int16(arg.Ver), arg.Operation, arg.Msg)
+	if channel = bucket.Channel(arg.Key); channel != nil {
+		err = channel.Push(&arg.P)
 	}
 	return
 }
 
-// Pushs push multiple messages to a specified sub key
-func (this *PushRPC) PushMsgs(arg *proto.PushMsgsArg, reply *proto.PushMsgsReply) (err error) {
-	var (
-		bucket  *Bucket
-		channel *Channel
-	)
-	reply.Index = -1
-	if arg == nil || len(arg.Vers) != len(arg.Operations) || len(arg.Operations) != len(arg.Msgs) {
-		err = ErrPushMsgsArg
-		return
-	}
-	bucket = DefaultServer.Bucket(arg.Key)
-	if channel = bucket.Get(arg.Key); channel != nil {
-		reply.Index, err = channel.PushMsgs(arg.Vers, arg.Operations, arg.Msgs)
-	}
-	return
-}
-
-// Push push a message to a specified sub key
+// Push push a message to specified sub keys
 func (this *PushRPC) MPushMsg(arg *proto.MPushMsgArg, reply *proto.MPushMsgReply) (err error) {
 	var (
 		bucket  *Bucket
@@ -95,8 +82,8 @@ func (this *PushRPC) MPushMsg(arg *proto.MPushMsgArg, reply *proto.MPushMsgReply
 	}
 	for n, key = range arg.Keys {
 		bucket = DefaultServer.Bucket(key)
-		if channel = bucket.Get(key); channel != nil {
-			if err = channel.PushMsg(int16(arg.Ver), arg.Operation, arg.Msg); err != nil {
+		if channel = bucket.Channel(key); channel != nil {
+			if err = channel.Push(&arg.P); err != nil {
 				return
 			}
 			reply.Index = int32(n)
@@ -110,53 +97,56 @@ func (this *PushRPC) MPushMsgs(arg *proto.MPushMsgsArg, reply *proto.MPushMsgsRe
 	var (
 		bucket  *Bucket
 		channel *Channel
-		key     string
-		n       int
+		n       int32
+		PMArg   *proto.PushMsgArg
 	)
 	reply.Index = -1
-	if arg == nil || len(arg.Keys) != len(arg.Vers) || len(arg.Vers) != len(arg.Operations) || len(arg.Operations) != len(arg.Msgs) {
+	if arg == nil {
 		err = ErrMPushMsgsArg
 		return
 	}
-	for n, key = range arg.Keys {
-		bucket = DefaultServer.Bucket(key)
-		if channel = bucket.Get(key); channel != nil {
-			if err = channel.PushMsg(int16(arg.Vers[n]), arg.Operations[n], arg.Msgs[n]); err != nil {
+	for _, PMArg = range arg.PMArgs {
+		bucket = DefaultServer.Bucket(PMArg.Key)
+		if channel = bucket.Channel(PMArg.Key); channel != nil {
+			if err = channel.Push(&PMArg.P); err != nil {
 				return
 			}
-			reply.Index = int32(n)
+			n++
+			reply.Index = n
 		}
 	}
 	return
 }
 
+// Broadcast broadcast msg to all user.
 func (this *PushRPC) Broadcast(arg *proto.BoardcastArg, reply *proto.NoReply) (err error) {
 	var bucket *Bucket
 	for _, bucket = range DefaultServer.Buckets {
-		go bucket.Broadcast(int16(arg.Ver), arg.Operation, arg.Msg)
+		go bucket.Broadcast(&arg.P)
 	}
 	return
 }
 
+// Broadcast broadcast msg to specified room.
 func (this *PushRPC) BroadcastRoom(arg *proto.BoardcastRoomArg, reply *proto.NoReply) (err error) {
 	var bucket *Bucket
 	for _, bucket = range DefaultServer.Buckets {
-		go bucket.BroadcastRoom(arg.RoomId, int16(arg.Ver), arg.Operation, arg.Msg)
+		bucket.BroadcastRoom(arg)
 	}
 	return
 }
 
-func (this *PushRPC) Rooms(arg *proto.NoArgs, reply *proto.RoomsReply) (err error) {
+func (this *PushRPC) Rooms(arg *proto.NoArg, reply *proto.RoomsReply) (err error) {
 	var (
-		roomId int32
-		bucket *Bucket
-		rooms  = make(map[int32]bool)
+		roomId  int32
+		bucket  *Bucket
+		roomIds = make(map[int32]struct{})
 	)
 	for _, bucket = range DefaultServer.Buckets {
 		for roomId, _ = range bucket.Rooms() {
-			rooms[roomId] = true
+			roomIds[roomId] = struct{}{}
 		}
 	}
-	reply.Rooms = rooms
+	reply.RoomIds = roomIds
 	return
 }
